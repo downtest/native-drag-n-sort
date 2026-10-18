@@ -2,8 +2,8 @@ name: Publish Package
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - master
 
 permissions:
   id-token: write  # Required for OIDC trusted publishing
@@ -19,6 +19,18 @@ jobs:
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-          package-manager-cache: false  # never use caching in release builds
+          package-manager-cache: false
 
-      - run: npm publish --access public
+      - name: Check if version already published
+        id: check
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view native-drag-n-sort@"$PKG_VERSION" version >/dev/null 2>&1; then
+           echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.check.outputs.skip == 'false'
+        run: npm publish --access public
