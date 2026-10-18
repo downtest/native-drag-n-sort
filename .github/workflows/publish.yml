@@ -19,16 +19,18 @@ jobs:
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-          package-manager-cache: false
+          package-manager-cache: false  # never use caching in release builds
 
-      - name: Check if version already published
+      - name: Check if version is already published
         id: check
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
-          if npm view native-drag-n-sort@"$PKG_VERSION" version >/dev/null 2>&1; then
-           echo "skip=true" >> "$GITHUB_OUTPUT"
+          if npm view "native-drag-n-sort@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Version $PKG_VERSION is already published — skipping."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Version $PKG_VERSION is new — will publish."
           fi
 
       - name: Publish
