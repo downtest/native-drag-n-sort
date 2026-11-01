@@ -37,8 +37,9 @@ independent instances on the same page.
   instance that uses it is destroyed. So 10 instances with the same config produce a single `<style>`
   in `<head>`.
 - `mousedown` / `touchstart` are attached to the container; `mousemove` / `touchmove` and
-  `mouseup` / `touchend` / `touchcancel` — to `document` (so a drag keeps working outside the
-  container).
+  `mouseup` / `touchend` — to `document` (so a drag keeps working outside the container).
+  `touchcancel` aborts the drag instead of dropping: the browser took the gesture, so moving the
+  item would be wrong.
 
 ### 2. Starting a drag
 
@@ -53,8 +54,9 @@ The drag actually begins when **both** conditions are met:
 - `dragDelay` has elapsed, **and**
 - the pointer has moved at least `dragThreshold` pixels from the start point.
 
-This lets a quick, confident movement start the drag without waiting for the full delay, while a
-simple click never triggers it.
+Both conditions are required: a long press without movement does not start a drag, and a quick
+movement starts it only after `dragDelay`. Together they filter out accidental drags on clicks,
+selection and scrolling.
 
 ### 3. While dragging
 
@@ -81,7 +83,8 @@ On pointer up the module:
    order) and, if `animation` is enabled, plays a FLIP animation.
 3. Removes the clone and the indicator, restores the original element and emits `dragEnd`.
 
-`cancel()` aborts the drag at any moment without applying changes and emits `dragCancel`.
+`cancel()` aborts the drag at any moment: an active drag is rolled back and emits `dragCancel`, a
+drag that has not started yet is cancelled silently.
 
 ### Events flow
 
@@ -89,7 +92,22 @@ On pointer up the module:
 pointerdown ──► (dragDelay + dragThreshold) ──► dragStart
 pointermove ──► dragMove (per frame) ──► dragOver (only when the target changes)
 pointerup   ──► drop ──► [DOM update in 'dom' mode] ──► dragEnd
-cancel()    ──► dragCancel
+cancel()    ──► dragCancel (only if the drag has already started)
+```
+
+### Several instances on one page
+
+Instances are independent: each has its own state, container and listeners. Styles are shared —
+the module keeps a registry of injected `<style>` blocks, keyed by the class names, so 10 instances
+with the same `ghostClass` / `draggingClass` / `cloneClass` produce a single `<style>` in `<head>`.
+The block is removed when the last instance that uses it is destroyed.
+
+```js
+const left = dragNDrop({ containerSelector: '#left', itemSelector: '.item' });
+const right = dragNDrop({ containerSelector: '#right', itemSelector: '.item' });
+// one shared <style> in <head>
+left.destroy();  // style stays: `right` still uses it
+right.destroy(); // style removed
 ```
 
 # Configuration Options
@@ -106,7 +124,7 @@ cancel()    ──► dragCancel
 | **scrollSpeed** | `number` | `10` | Scroll step in pixels applied on each frame while dragging near the edges of the scroll container |
 | **scrollThreshold** | `number` | `50` | Distance from the scroll container edge in pixels that triggers auto-scrolling |
 | **dragThreshold** | `number` | `5` | Minimum cursor movement in pixels before a drag starts. The drag begins once both `dragDelay` has elapsed and the pointer has moved at least this far |
-| **debug** | `boolean` | `false` | Shows a debug overlay with the cursor level inside the hovered item |
+| **debug** | `boolean` | `false` | Shows a per-instance debug overlay with the cursor level inside the hovered item. The overlay markup has no fixed `id`, so several debug instances can coexist. Can be toggled at runtime via `refresh({ debug })` |
 | **reorder** | `'dom'` \| `'manual'` | `'dom'` | Who applies the new order. `'dom'` — the module moves the real element (backward compatible). `'manual'` — the module never touches the real DOM; the consumer (e.g. Vue) applies the order from the event payload |
 | **getItemId** | `(el) => any` | `el => el?.dataset?.id ?? null` | Maps a DOM item to a serializable id used in event payloads |
 | **getContainerId** | `(el) => any` | `el => el?.dataset?.id ?? el?.dataset?.containerId ?? null` | Maps a DOM container to a serializable id used in event payloads |
@@ -123,10 +141,10 @@ cancel()    ──► dragCancel
 
 | Method | Description |
 |--------|-------------|
-| **destroy()** | Removes all event listeners and injected styles, and cancels any active drag. Call it on unmount |
-| **refresh(newOptions?)** | Re-reads the container (after a re-render) and optionally merges `newOptions` into the config. Useful to toggle `disabled` or update predicates at runtime |
+| **destroy()** | Removes all event listeners, cancels any active drag and releases this instance's reference to the injected styles. Styles are actually removed from `<head>` only when the last instance using them is destroyed. Safe to call more than once |
+| **refresh(newOptions?)** | Re-reads the container (after a re-render) and optionally merges `newOptions` into the config. If `ghostClass` / `draggingClass` / `cloneClass` or `debug` changed, the injected styles and the debug overlay are rebuilt to match |
 | **getState()** | Returns a serializable snapshot: `{ isDragging, itemId, fromContainerId, fromIndex, toContainerId, toIndex, position }` |
-| **cancel()** | Aborts the current drag without applying any changes and emits `dragCancel` |
+| **cancel()** | Aborts the drag. An active drag is cleaned up and emits `dragCancel`; a pending drag (still waiting for `dragDelay` / `dragThreshold`) is simply cancelled without any event |
 
 ## Events
 
@@ -140,7 +158,9 @@ All events are dispatched on the container element and carry a serializable `det
 | **dragOver** | Only when the drop target changes (container / index / position) | same payload |
 | **drop** | On release, **before** the DOM is modified | same payload |
 | **dragEnd** | Drag finished (after the DOM is updated in `'dom'` mode) | same payload |
-| **dragCancel** | Drag aborted via `cancel()` | same payload |
+| **dragCancel** | Drag aborted via `cancel()` while active | same payload |
+
+> `cancel()` called before the drag has started (during `dragDelay`) emits nothing.
 
 ### Payload fields
 
@@ -287,3 +307,50 @@ onBeforeUnmount(() => {
     </div>
 </template>
 ```
+
+## Performance notes
+
+Deeply nested lists are the expensive case: the module must find the drop target and keep the
+ghost indicator in sync on every frame. The hot path is kept allocation-free:
+
+- **Child container lookup** — `item.querySelector(containerSelector)` is cached in a `WeakMap`
+  keyed by the item element, so the subtree is walked once per item instead of once per frame.
+- **Drag clone** — the deep clone of the dragged item is created once per drag (`state.dragItemCopy`)
+  and reused both for the cursor ghost and for the drop indicator. Cloning a large subtree on every
+  drop-target change was the main cost in nested lists.
+- **Drop indicator** — created once per drag and then only moved (`appendChild`/`before`/`after`),
+  never re-created. Moving a node does not invalidate the rest of the document.
+- **FLIP animation** — `getBoundingClientRect` is read only for the item children of the containers
+  that actually change (previous target and next target), not for the whole tree.
+- **Auto-scroll** — the scroll container and its `getBoundingClientRect` are cached and re-measured
+  only when `scrollTop` changed.
+- **Move throttling** — pointer moves are coalesced into one `requestAnimationFrame` pass; identical
+  coordinates are skipped, so a burst of `mousemove` events costs a single layout query.
+
+## Tests
+
+The test suite runs the real module against a jsdom document with a hand-rolled layout, so it
+exercises exactly what a user does: press the mouse, wait for `dragDelay`, move, release.
+
+```bash
+npm test          # node --test --test-concurrency=1 "test/*.test.mjs"
+```
+
+- `test/helpers.mjs` — jsdom setup, manual layout (`layout(el, box)`), `elementsFromPoint`
+  hit-testing, `getBoundingClientRect` from the layout, deterministic `requestAnimationFrame`
+  with `flushFrames()`, and a mouse emulator (`down`/`move`/`up`).
+- `test/drag.test.mjs` — flat lists: styles/API, `dragDelay` + `dragThreshold` start conditions,
+  clone position and content, `draggingClass`, before/after insertion, `dragStart`/`drop`/`dragEnd`
+  sequence, repeated drags, `cancel()`, `reorder: 'manual'`, `canDrag`, `handleSelector`, `disabled`.
+- `test/nested.test.mjs` — nested lists: `before`/`in`/`after` zones, dropping into a child
+  container, moving items between levels in both directions, rejecting a drop into the dragged
+  element's own subtree, `canDrop`, and a four-level-deep tree.
+- `test/lifecycle.test.mjs` — side effects and cleanup: shared `<style>` across instances, custom
+  classes, idempotent `destroy()`, `destroy()` during a drag, `refresh()`, debug overlay, touch
+  drag (including `touchcancel`), release outside the list, auto-scroll and `dragMove` throttling.
+- `test/perf.test.mjs` — the hot path is asserted by counting expensive operations instead of
+  measuring time: the deep clone happens at most 3 times per drag (one cached copy, the cursor
+  ghost, the indicator), and each item's child container is looked up at most once.
+
+Run them after every change: a broken start condition (drag never begins) or a broken finish
+condition (release does not complete the drag) fails the corresponding test immediately.

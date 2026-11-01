@@ -3,7 +3,7 @@
 // и удаляются только когда не остаётся ни одного потребителя.
 const styleRegistry = new Map();
 
-function acquireStyle(signature, css) {
+const acquireStyle = (signature, css) => {
     let entry = styleRegistry.get(signature);
     if (!entry) {
         const el = document.createElement('style');
@@ -14,16 +14,18 @@ function acquireStyle(signature, css) {
     }
     entry.count++;
     return entry;
-}
+};
 
-function releaseStyle(entry) {
+const releaseStyle = (entry) => {
     if (!entry) return;
     entry.count--;
     if (entry.count <= 0) {
         entry.el.remove();
         styleRegistry.delete(entry.signature);
     }
-}
+};
+
+const DEBUG_STYLE_SIGNATURE = 'ds-debug';
 
 export default function dragNDrop(options = {}) {
     // Конфигурация с вашими параметрами
@@ -93,31 +95,57 @@ export default function dragNDrop(options = {}) {
         lastReference: null,
         lastPosition: null,
         // Кэш элементов и цели автоскролла на время перетаскивания
-        items: null,
         scrollTarget: null,
-        debugContainer: null,
-        debugElement: null, // row/cursor/element/level
+        scrollRect: null,
+        scrollRectTop: null,
+        // Кэш глубокого клона перетаскиваемого элемента
+        dragItemCopy: null,
+        debugElement: null, // индикатор уровня курсора внутри элемента
     };
 
     // Основные элементы
     if (!state.container) return;
 
+    // Стили используют настраиваемые классы из конфига.
+    // Одинаковый набор классов переиспользует один общий <style> на все инстансы.
+    let styleEntry = null;
+    let styleSignature = null;
+
+    const applyStyles = () => {
+        const signature = `${config.cloneClass}|${config.draggingClass}|${config.ghostClass}`;
+        if (signature === styleSignature) return;
+
+        const nextEntry = acquireStyle(signature, `
+            .${config.cloneClass} {
+                position: fixed;
+                cursor: grabbing;
+                pointer-events: none;
+            }
+            .${config.draggingClass} {
+                display: none;
+            }
+            .${config.ghostClass} {
+                opacity: 0.5;
+                background-color: #eee;
+                border: 1px dashed #ccc;
+                pointer-events: none;
+            }
+        `);
+        releaseStyle(styleEntry);
+        styleEntry = nextEntry;
+        styleSignature = signature;
+    };
+
+    // Debug-оверлей создаётся на инстанс, но <style> для него общий.
+    // id не используются: несколько debug-инстансов не конфликтуют.
     let debugInfo = null;
+    let debugContainer = null;
     let debugStyleEntry = null;
-    if (config.debug) {
-        debugInfo = document.createElement('div');
-        debugInfo.classList.add('ds-debug-info');
 
-        state.debugContainer = document.createElement('div');
-        state.debugContainer.classList.add('ds-debug-container');
-        state.debugContainer.id = 'ds-debug-container';
+    const setupDebug = () => {
+        if (debugInfo) return;
 
-        state.debugElement = document.createElement('div');
-        state.debugElement.classList.add('ds-debug-cursor-level');
-        state.debugElement.id = 'ds-debug-cursor-level';
-
-        // Общий <style> для debug-оверлея — один на все инстансы
-        debugStyleEntry = acquireStyle('ds-debug', `
+        debugStyleEntry = acquireStyle(DEBUG_STYLE_SIGNATURE, `
             .ds-debug-info {
                 position: fixed;
                 width: 150px;
@@ -144,30 +172,34 @@ export default function dragNDrop(options = {}) {
             }
         `);
 
-        document.body.appendChild(debugInfo);
-        debugInfo.appendChild(state.debugContainer);
-        state.debugContainer.appendChild(state.debugElement);
-    }
+        debugInfo = document.createElement('div');
+        debugInfo.classList.add('ds-debug-info');
 
-    // Стили используют настраиваемые классы из конфига.
-    // Одинаковый набор классов переиспользует один общий <style> на все инстансы.
-    const styleSignature = `${config.cloneClass}|${config.draggingClass}|${config.ghostClass}`;
-    const styleEntry = acquireStyle(styleSignature, `
-        .${config.cloneClass} {
-            position: fixed;
-            cursor: grabbing;
-            pointer-events: none;
-        }
-        .${config.draggingClass} {
-            display: none;
-        }
-        .${config.ghostClass} {
-            opacity: 0.5;
-            background-color: #eee;
-            border: 1px dashed #ccc;
-            pointer-events: none;
-        }
-    `);
+        debugContainer = document.createElement('div');
+        debugContainer.classList.add('ds-debug-container');
+
+        state.debugElement = document.createElement('div');
+        state.debugElement.classList.add('ds-debug-cursor-level');
+
+        document.body.appendChild(debugInfo);
+        debugInfo.appendChild(debugContainer);
+        debugContainer.appendChild(state.debugElement);
+    };
+
+    const teardownDebug = () => {
+        if (!debugInfo) return;
+
+        debugInfo.remove();
+        debugInfo = null;
+        debugContainer = null;
+        state.debugElement = null;
+
+        releaseStyle(debugStyleEntry);
+        debugStyleEntry = null;
+    };
+
+    applyStyles();
+    if (config.debug) setupDebug();
 
     // Вспомогательные функции
     const getCoordinates = (e) => {
@@ -208,8 +240,20 @@ export default function dragNDrop(options = {}) {
     // Ближайший контейнер-предок элемента (сам элемент не учитывается).
     const getClosestContainer = (el) => el?.closest?.(config.containerSelector) ?? null;
 
-    // Ближайший вложенный контейнер внутри элемента — цель для зоны 'in'.
-    const getChildContainer = (item) => item?.querySelector?.(config.containerSelector) ?? null;
+    // Вложенный контейнер внутри элемента (первый по дереву).
+    // Результат кэшируется в WeakMap, чтобы не обходить поддерево на каждом кадре.
+    // Кэш привязан к элементу и собирается сборщиком мусора вместе с ним.
+    const childContainerCache = new WeakMap();
+    const getChildContainer = (item) => {
+        if (!item) return null;
+        if (childContainerCache.has(item)) return childContainerCache.get(item);
+        const found = item.querySelector(config.containerSelector);
+        childContainerCache.set(item, found);
+        return found;
+    };
+
+    // Есть ли в элементе вложенный контейнер (используется для выбора зон before/in/after).
+    const hasChildContainer = (item) => getChildContainer(item) !== null;
 
     // Скроллируется ли элемент по вертикали.
     const isScrollable = (el) => {
@@ -235,20 +279,28 @@ export default function dragNDrop(options = {}) {
         position === 'in' ? referenceElement : referenceElement.parentElement;
 
     // Клон перетаскиваемого элемента без класса перетаскивания.
-    const cloneItem = () => {
-        const clone = state.draggedItem.cloneNode(true);
-        clone.classList.remove(config.draggingClass);
-        return clone;
+    // Клонируется один раз за перетаскивание: глубокий клон поддерева дорог,
+    // а исходник за время drag не меняется.
+    const getDragClone = () => {
+        if (!state.dragItemCopy) {
+            state.dragItemCopy = state.draggedItem.cloneNode(true);
+            state.dragItemCopy.classList.remove(config.draggingClass);
+        }
+        return state.dragItemCopy;
     };
 
-    // Снимок позиций элементов для FLIP-анимации (без ghost и перетаскиваемого).
-    const captureItemRects = () => {
+    // Снимок позиций элементов, которые могут сместиться:
+    // прямые item-дети затронутых контейнеров, без перетаскиваемого элемента.
+    // Анимировать всё дерево бессмысленно и дорого — двигаются только соседи.
+    const captureItemRects = (containers) => {
         const rects = new Map();
-        (state.items || []).forEach((el) => {
-            if (el === state.draggedItem) return;
-            if (state.ghostItem?.contains(el)) return;
-            if (state.currentDropTarget?.contains(el)) return;
-            rects.set(el, el.getBoundingClientRect());
+        containers.forEach((container) => {
+            if (!container) return;
+            for (const el of container.children) {
+                if (el === state.draggedItem) continue;
+                if (!el.matches(config.itemSelector)) continue;
+                rects.set(el, el.getBoundingClientRect());
+            }
         });
         return rects;
     };
@@ -286,28 +338,41 @@ export default function dragNDrop(options = {}) {
 
     // Сброс состояния после завершения/отмены перетаскивания.
     const resetState = () => {
-        state.isDragging = false;
-        state.pendingItem = null;
-        state.delayElapsed = false;
-        state.draggedItem = null;
-        state.ghostItem = null;
-        state.currentDropTarget = null;
-        state.fromContainer = null;
-        state.fromIndex = null;
-        state.toContainer = null;
-        state.toIndex = null;
-        state.position = null;
-        state.prevToContainer = null;
-        state.prevToIndex = null;
-        state.prevPosition = null;
+        Object.assign(state, {
+            isDragging: false,
+            pendingItem: null,
+            delayElapsed: false,
+            draggedItem: null,
+            ghostItem: null,
+            currentDropTarget: null,
+            fromContainer: null,
+            fromIndex: null,
+            toContainer: null,
+            toIndex: null,
+            position: null,
+            prevToContainer: null,
+            prevToIndex: null,
+            prevPosition: null,
+            lastReference: null,
+            lastPosition: null,
+            dragItemCopy: null,
+            scrollTarget: null,
+            scrollRect: null,
+            scrollRectTop: null,
+            startX: 0,
+            startY: 0,
+            lastX: 0,
+            lastY: 0,
+        });
+    };
+
+    const removeGhostElement = () => {
+        if (state.currentDropTarget) {
+            state.currentDropTarget.remove();
+            state.currentDropTarget = null;
+        }
         state.lastReference = null;
         state.lastPosition = null;
-        state.items = null;
-        state.scrollTarget = null;
-        state.startX = 0;
-        state.startY = 0;
-        state.lastX = 0;
-        state.lastY = 0;
     };
 
     // Удаление ghost-элемента и снятие класса перетаскивания.
@@ -321,50 +386,103 @@ export default function dragNDrop(options = {}) {
         }
     };
 
-    const startDrag = (item, x, y) => {
-        state.pendingItem = null;
-        state.delayElapsed = false;
-        state.draggedItem = item;
-
-        // Скрываем оригинальный элемент (но сохраняем его место)
-        item.classList.add(config.draggingClass);
-
-        const fromContainer = getClosestContainer(item.parentElement);
-        if (fromContainer) {
-            state.fromContainer = fromContainer;
-            state.fromIndex = getItemIndex(fromContainer, item);
+    // Пересчитываем данные цели по позиции ghost в DOM
+    const updateTargetData = (position) => {
+        const ghost = state.currentDropTarget;
+        if (!ghost || !ghost.parentElement) {
+            state.toContainer = null;
+            state.toIndex = null;
+            state.position = null;
+            return;
         }
 
-        // Кэшируем элементы для FLIP-анимации на время перетаскивания
-        if (config.animation) {
-            state.items = Array.from(state.container.querySelectorAll(config.itemSelector));
-        }
-
-        // Создаем элемент, который будет следовать за курсором
-        state.ghostItem = cloneItem();
-        state.ghostItem.classList.add(config.cloneClass);
-        Object.assign(state.ghostItem.style, {
-            left: `${x}px`,
-            top: `${y}px`,
-        });
-
-        document.body.appendChild(state.ghostItem);
-        state.isDragging = true;
-
-        updateDropTarget(x, y);
-
-        // Запоминаем стартовую цель, чтобы dragOver срабатывал только на изменениях
-        state.prevToContainer = state.toContainer;
-        state.prevToIndex = state.toIndex;
-        state.prevPosition = state.position;
-
-        dispatch('dragStart', buildPayload());
+        state.toContainer = ghost.parentElement;
+        // Индекс считаем без перетаскиваемого элемента — это итоговый индекс после перемещения
+        state.toIndex = getItemIndex(ghost.parentElement, ghost, true);
+        state.position = position;
     };
 
-    const moveGhost = (x, y) => {
-        if (!state.ghostItem) return;
-        state.ghostItem.style.left = `${x}px`;
-        state.ghostItem.style.top = `${y}px`;
+    const createGhostElement = (referenceElement, position) => {
+        // Нельзя класть элемент внутрь самого себя (или своего потомка) — иначе цикл в DOM
+        if (referenceElement === state.draggedItem || state.draggedItem?.contains(referenceElement)) {
+            return;
+        }
+
+        // Потребитель может запретить бросок в конкретный контейнер
+        const targetContainer = getTargetContainer(referenceElement, position);
+        if (typeof config.canDrop === 'function' && !config.canDrop(state.draggedItem, targetContainer)) {
+            return;
+        }
+
+        // Цель не изменилась — не пересоздаём ghost (и не дёргаем анимацию)
+        if (state.lastReference === referenceElement && state.lastPosition === position) {
+            return;
+        }
+
+        // Анимируются только затронутые контейнеры: старый и новый
+        const affected = state.currentDropTarget?.parentElement
+            ? [state.currentDropTarget.parentElement, targetContainer]
+            : [targetContainer];
+        const rects = config.animation ? captureItemRects(affected) : null;
+
+        // Индикатор создаётся один раз за перетаскивание и дальше только переносится —
+        // глубокий клон поддерева на каждую смену цели не нужен.
+        if (!state.currentDropTarget) {
+            state.currentDropTarget = getDragClone().cloneNode(true);
+            state.currentDropTarget.classList.add(config.ghostClass);
+        }
+
+        if (position === 'in') {
+            referenceElement.appendChild(state.currentDropTarget);
+        } else if (position === 'before') {
+            referenceElement.before(state.currentDropTarget);
+        } else {
+            referenceElement.after(state.currentDropTarget);
+        }
+
+        state.lastReference = referenceElement;
+        state.lastPosition = position;
+
+        updateTargetData(position);
+
+        if (rects) playFlip(rects);
+    };
+
+    // Автоскролл: скроллим явно заданный контейнер либо ближайший скроллируемый предок
+    // под курсором, с фолбэком на корневой контейнер (обратная совместимость).
+    // Цель резолвится один раз за перетаскивание и кэшируется.
+    const handleAutoScroll = (elementsUnderPointer, y) => {
+        let scrollTarget = state.scrollTarget;
+        if (!scrollTarget || !scrollTarget.isConnected) {
+            if (config.scrollContainer) {
+                // Явно заданный контейнер (селектор или элемент)
+                scrollTarget = typeof config.scrollContainer === 'string'
+                    ? document.querySelector(config.scrollContainer)
+                    : config.scrollContainer;
+            } else {
+                // Достаточно верхнего элемента под курсором
+                scrollTarget = getScrollableAncestor(elementsUnderPointer[0]) || state.container;
+            }
+            state.scrollTarget = scrollTarget;
+            state.scrollRect = null;
+        }
+        if (!scrollTarget) return;
+
+        // getBoundingClientRect форсирует layout, поэтому читаем его только когда
+        // контейнер реально прокрутился (или ещё не измерялся).
+        if (!state.scrollRect || state.scrollRectTop !== scrollTarget.scrollTop) {
+            state.scrollRect = scrollTarget.getBoundingClientRect();
+            state.scrollRectTop = scrollTarget.scrollTop;
+        }
+        const rect = state.scrollRect;
+
+        if (y < rect.top + config.scrollThreshold) {
+            // Scroll up
+            scrollTarget.scrollTop -= config.scrollSpeed;
+        } else if (y > rect.bottom - config.scrollThreshold) {
+            // Scroll down
+            scrollTarget.scrollTop += config.scrollSpeed;
+        }
     };
 
     const updateDropTarget = (x, y) => {
@@ -397,16 +515,19 @@ export default function dragNDrop(options = {}) {
                 state.debugElement.style.top = `${(innerY * 100) / rect.height}%`;
             }
 
-            // Вложенный контейнер внутри элемента — цель для зоны 'in'
-            const childContainer = getChildContainer(itemElement);
-            // Курсор прямо над вложенным контейнером (а не над вложенным элементом внутри него)
-            const overChildContainer = childContainer && itemContainer === childContainer;
+            // Вложенный контейнер внутри элемента — цель для зоны 'in'.
+            // Курсор прямо над вложенным контейнером (а не над вложенным элементом внутри него).
+            // Проверка через contains: itemContainer уже найден hit-test'ом, обход поддерева не нужен
+            // и корректно работает при нескольких вложенных контейнерах в одном элементе.
+            const overChildContainer = itemContainer && itemContainer !== itemElement
+                && itemElement.contains(itemContainer);
 
             if (overChildContainer) {
                 // Над вложенным контейнером — кладём внутрь
-                createGhostElement(childContainer, 'in')
-            } else if (childContainer) {
+                createGhostElement(itemContainer, 'in')
+            } else if (hasChildContainer(itemElement)) {
                 // Три зоны: before / in / after
+                const childContainer = getChildContainer(itemElement);
                 const third = rect.height / 3;
 
                 if (innerY < third) {
@@ -429,71 +550,6 @@ export default function dragNDrop(options = {}) {
         }
     };
 
-    function createGhostElement(referenceElement, position) {
-        // Нельзя класть элемент внутрь самого себя (или своего потомка) — иначе цикл в DOM
-        if (referenceElement === state.draggedItem || state.draggedItem?.contains(referenceElement)) {
-            return;
-        }
-
-        // Потребитель может запретить бросок в конкретный контейнер
-        const targetContainer = getTargetContainer(referenceElement, position);
-        if (typeof config.canDrop === 'function' && !config.canDrop(state.draggedItem, targetContainer)) {
-            return;
-        }
-
-        // Цель не изменилась — не пересоздаём ghost (и не дёргаем анимацию)
-        if (state.lastReference === referenceElement && state.lastPosition === position) {
-            return;
-        }
-
-        const rects = config.animation ? captureItemRects() : null;
-
-        removeGhostElement();
-
-        state.currentDropTarget = cloneItem();
-        state.currentDropTarget.classList.add(config.ghostClass);
-
-        if (position === 'in') {
-            referenceElement.appendChild(state.currentDropTarget);
-        } else if (position === 'before') {
-            referenceElement.before(state.currentDropTarget);
-        } else {
-            referenceElement.after(state.currentDropTarget);
-        }
-
-        state.lastReference = referenceElement;
-        state.lastPosition = position;
-
-        updateTargetData(position);
-
-        if (rects) playFlip(rects);
-    }
-
-    // Пересчитываем данные цели по позиции ghost в DOM
-    function updateTargetData(position) {
-        const ghost = state.currentDropTarget;
-        if (!ghost || !ghost.parentElement) {
-            state.toContainer = null;
-            state.toIndex = null;
-            state.position = null;
-            return;
-        }
-
-        state.toContainer = ghost.parentElement;
-        // Индекс считаем без перетаскиваемого элемента — это итоговый индекс после перемещения
-        state.toIndex = getItemIndex(ghost.parentElement, ghost, true);
-        state.position = position;
-    }
-
-    function removeGhostElement() {
-        if (state.currentDropTarget) {
-            state.currentDropTarget.remove();
-            state.currentDropTarget = null;
-        }
-        state.lastReference = null;
-        state.lastPosition = null;
-    }
-
     // Эмитим dragOver только когда цель изменилась
     const emitDragOverIfChanged = (payload) => {
         const changed =
@@ -510,35 +566,41 @@ export default function dragNDrop(options = {}) {
         dispatch('dragOver', payload);
     };
 
-    // Автоскролл: скроллим явно заданный контейнер либо ближайший скроллируемый предок
-    // под курсором, с фолбэком на корневой контейнер (обратная совместимость).
-    // Цель резолвится один раз за перетаскивание и кэшируется.
-    function handleAutoScroll(elementsUnderPointer, y) {
-        let scrollTarget = state.scrollTarget;
-        if (!scrollTarget || !scrollTarget.isConnected) {
-            if (config.scrollContainer) {
-                // Явно заданный контейнер (селектор или элемент)
-                scrollTarget = typeof config.scrollContainer === 'string'
-                    ? document.querySelector(config.scrollContainer)
-                    : config.scrollContainer;
-            } else {
-                // Достаточно верхнего элемента под курсором
-                scrollTarget = getScrollableAncestor(elementsUnderPointer[0]) || state.container;
-            }
-            state.scrollTarget = scrollTarget;
-        }
-        if (!scrollTarget) return;
+    const startDrag = (item, x, y) => {
+        state.pendingItem = null;
+        state.delayElapsed = false;
+        state.draggedItem = item;
+        state.dragItemCopy = null;
 
-        const rect = scrollTarget.getBoundingClientRect();
+        // Скрываем оригинальный элемент (но сохраняем его место)
+        item.classList.add(config.draggingClass);
 
-        if (y < rect.top + config.scrollThreshold) {
-            // Scroll up
-            scrollTarget.scrollTop -= config.scrollSpeed;
-        } else if (y > rect.bottom - config.scrollThreshold) {
-            // Scroll down
-            scrollTarget.scrollTop += config.scrollSpeed;
+        const fromContainer = getClosestContainer(item.parentElement);
+        if (fromContainer) {
+            state.fromContainer = fromContainer;
+            state.fromIndex = getItemIndex(fromContainer, item);
         }
-    }
+
+        // Создаем элемент, который будет следовать за курсором
+        state.ghostItem = getDragClone().cloneNode(true);
+        state.ghostItem.classList.add(config.cloneClass);
+        Object.assign(state.ghostItem.style, {
+            left: `${x}px`,
+            top: `${y}px`,
+        });
+
+        document.body.appendChild(state.ghostItem);
+        state.isDragging = true;
+
+        updateDropTarget(x, y);
+
+        // Запоминаем стартовую цель, чтобы dragOver срабатывал только на изменениях
+        state.prevToContainer = state.toContainer;
+        state.prevToIndex = state.toIndex;
+        state.prevPosition = state.position;
+
+        dispatch('dragStart', buildPayload());
+    };
 
     const stopDrag = () => {
         cancelFrame();
@@ -551,7 +613,8 @@ export default function dragNDrop(options = {}) {
         // В режиме 'dom' модуль сам перемещает реальный элемент (обратная совместимость).
         // В режиме 'manual' реальный DOM не трогаем — порядок меняет потребитель.
         if (config.reorder === 'dom' && state.currentDropTarget?.parentNode) {
-            const rects = config.animation ? captureItemRects() : null;
+            const targetContainer = state.currentDropTarget.parentNode;
+            const rects = config.animation ? captureItemRects([targetContainer]) : null;
             state.currentDropTarget.replaceWith(state.draggedItem);
             state.toContainer = state.draggedItem.parentNode;
             state.toIndex = getItemIndex(state.draggedItem.parentNode, state.draggedItem);
@@ -565,7 +628,6 @@ export default function dragNDrop(options = {}) {
         resetState();
     };
 
-    // Обработчики событий
     // Курсор сместился от точки нажатия не меньше, чем на dragThreshold.
     const hasExceededThreshold = (x, y) =>
         Math.hypot(x - state.startX, y - state.startY) >= config.dragThreshold;
@@ -585,6 +647,24 @@ export default function dragNDrop(options = {}) {
         lastFramePoint = null;
     };
 
+    // Прерывание перетаскивания: активное — с событием dragCancel,
+    // ожидающее старта — просто отменяет отложенный запуск.
+    const cancelDrag = () => {
+        clearTimeout(state.dragDelayTimer);
+        cancelFrame();
+
+        if (!state.isDragging) {
+            state.pendingItem = null;
+            state.delayElapsed = false;
+            return;
+        }
+
+        cleanupDrag();
+
+        dispatch('dragCancel', buildPayload());
+        resetState();
+    };
+
     const scheduleFrame = (x, y) => {
         // Точка не изменилась с прошлого кадра/запланированного — пересчёт не нужен
         const ref = pendingPoint || lastFramePoint;
@@ -599,7 +679,12 @@ export default function dragNDrop(options = {}) {
             if (!point || !state.isDragging) return;
 
             lastFramePoint = point;
-            moveGhost(point.x, point.y);
+
+            if (state.ghostItem) {
+                state.ghostItem.style.left = `${point.x}px`;
+                state.ghostItem.style.top = `${point.y}px`;
+            }
+
             updateDropTarget(point.x, point.y);
 
             const payload = buildPayload();
@@ -668,6 +753,12 @@ export default function dragNDrop(options = {}) {
         }
     };
 
+    // touchcancel означает, что браузер забрал касание (скролл, жест, потеря фокуса).
+    // Завершать перетаскивание с перемещением элемента в этом случае нельзя.
+    const onTouchCancel = () => {
+        cancelDrag();
+    };
+
     // Инициализация
     state.container.addEventListener('mousedown', onPointerDown);
     state.container.addEventListener('touchstart', onPointerDown, { passive: false });
@@ -677,12 +768,18 @@ export default function dragNDrop(options = {}) {
 
     document.addEventListener('mouseup', onPointerUp);
     document.addEventListener('touchend', onPointerUp);
-    document.addEventListener('touchcancel', onPointerUp);
+    document.addEventListener('touchcancel', onTouchCancel);
 
     // Публичный API
+    let destroyed = false;
+
     return {
-        // Полностью снимает обработчики и внедрённые стили.
+        // Снимает обработчики и освобождает общие стили.
+        // Повторный вызов безопасен. Стили удаляются, когда их отпустит последний инстанс.
         destroy: () => {
+            if (destroyed) return;
+            destroyed = true;
+
             clearTimeout(state.dragDelayTimer);
             cancelFrame();
 
@@ -696,17 +793,29 @@ export default function dragNDrop(options = {}) {
             document.removeEventListener('touchmove', onPointerMove);
             document.removeEventListener('mouseup', onPointerUp);
             document.removeEventListener('touchend', onPointerUp);
-            document.removeEventListener('touchcancel', onPointerUp);
+            document.removeEventListener('touchcancel', onTouchCancel);
 
             releaseStyle(styleEntry);
-            releaseStyle(debugStyleEntry);
-            if (debugInfo) debugInfo.remove();
+            styleEntry = null;
+            styleSignature = null;
+
+            teardownDebug();
         },
 
-        // Перечитывает контейнер (после ре-рендера) и, при необходимости, обновляет опции.
+        // Перечитывает контейнер (после ре-рендера), обновляет опции и, если сменились
+        // классы или флаг debug, пересобирает внедрённые стили и оверлей.
         refresh: (newOptions) => {
+            if (destroyed) return;
+
             if (newOptions && typeof newOptions === 'object') {
                 Object.assign(config, newOptions);
+            }
+
+            applyStyles();
+            if (config.debug) {
+                setupDebug();
+            } else {
+                teardownDebug();
             }
 
             const nextContainer = document.querySelector(config.containerSelector);
@@ -725,16 +834,11 @@ export default function dragNDrop(options = {}) {
             ...buildPayload(),
         }),
 
-        // Прерывает текущее перетаскивание без применения изменений.
+        // Прерывает перетаскивание: активное — с событием dragCancel,
+        // ожидающее старта — просто отменяет отложенный запуск.
         cancel: () => {
-            if (!state.isDragging) return;
-            clearTimeout(state.dragDelayTimer);
-            cancelFrame();
-
-            cleanupDrag();
-
-            dispatch('dragCancel', buildPayload());
-            resetState();
+            if (destroyed) return;
+            cancelDrag();
         },
     };
 }
