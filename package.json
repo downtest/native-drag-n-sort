@@ -22,7 +22,8 @@
     ],
     "main": "index.js",
     "scripts": {
-        "test": "node --test --test-concurrency=1 \"test/*.test.mjs\""
+        "test": "node --test --test-concurrency=1 \"test/*.test.mjs\"",
+        "demo": "node demo/server.cjs"
     },
     "devDependencies": {
         "jsdom": "^30.1.3"

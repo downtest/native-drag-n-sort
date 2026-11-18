@@ -1,68 +1,56 @@
-var http = require('http');
-var fs = require('fs');
-var path = require('path');
+// Минимальный статический сервер для демо.
+// ES-модули нельзя загрузить по file:// — браузер блокирует такой запрос CORS-политикой,
+// поэтому демо нужно открывать по http.
+// Запуск: npm run demo (или node demo/server.cjs), затем http://localhost:8080/
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
 
-const PORT = 80;
+const ROOT = path.join(__dirname, '..');
+const PORT = Number(process.env.PORT) || 8080;
 
-// Create HTTP server
-http.createServer(function (request, response) {
-    // Parse the requested URL
-    const url = request.url;
+const CONTENT_TYPES = {
+    '.html': 'text/html; charset=utf-8',
+    '.js': 'application/javascript; charset=utf-8',
+    '.mjs': 'application/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.svg': 'image/svg+xml',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.ico': 'image/x-icon',
+};
 
-    // Set default to index.html if root is requested
-    let filePath = url === '/' ? '/index.html' : url;
-    // Add the directory prefix
-    filePath = path.join(__dirname, filePath);
+const server = http.createServer((request, response) => {
+    const { pathname } = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+    const relative = decodeURIComponent(pathname === '/' ? '/demo/index.html' : pathname);
 
-    // Специальное правило для index.js, который лежит в корне проекта
-    if (url === '/index.js') {
-        filePath = path.join(__dirname, '..', 'index.js');
-    } else {
-        // Все остальные файлы ищем в www/ или относительно demo/
-        filePath = path.join(__dirname, url === '/' ? 'index.html' : url);
+    // path.resolve нормализует '..' — запрос не может выйти за пределы проекта
+    const filePath = path.resolve(ROOT, '.' + relative);
+    if (!filePath.startsWith(ROOT + path.sep)) {
+        response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+        response.end('403 Forbidden');
+        return;
     }
 
-    // Determine content type based on file extension
-    let extname = path.extname(filePath);
-    let contentType = 'text/html';
-
-    switch (extname) {
-        case '.js':
-            contentType = 'application/javascript';
-            break;
-        case '.css':
-            contentType = 'text/css';
-            break;
-        case '.json':
-            contentType = 'application/json';
-            break;
-        case '.png':
-            contentType = 'image/png';
-            break;
-        case '.jpg':
-        case '.jpeg':
-            contentType = 'image/jpeg';
-            break;
-    }
-
-    // Read and serve the file
-    fs.readFile(filePath, function (error, content) {
+    fs.readFile(filePath, (error, content) => {
         if (error) {
-            if (error.code == 'ENOENT') {
-                // File not found
-                response.writeHead(404);
-                response.end('404 Not Found: ' + url);
-            } else {
-                // Some other error
-                response.writeHead(500);
-                response.end('500 Internal Error: ' + error.code);
-            }
-        } else {
-            // Successfully read the file
-            response.writeHead(200, { 'Content-Type': contentType });
-            response.end(content, 'utf-8');
+            const status = error.code === 'ENOENT' ? 404 : 500;
+            response.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
+            response.end(`${status} ${error.code}: ${relative}`);
+            return;
         }
+
+        response.writeHead(200, {
+            'Content-Type': CONTENT_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
+            'Cache-Control': 'no-store',
+        });
+        response.end(content);
     });
-}).listen(PORT, function () {
-    console.log(new Date().toJSON() + ' Server started successfully on port ' + PORT);
+});
+
+server.listen(PORT, () => {
+    console.log(`demo: http://localhost:${PORT}/`);
 });

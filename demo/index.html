@@ -1,81 +1,235 @@
-<div class="container">
-    <div class="item">
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>native-drag-n-sort — demo</title>
+<style>
+    :root {
+        color-scheme: light;
+        --border: #d6d9de;
+        --surface: #f7f8fa;
+        --accent: #0b7bd4;
+        --muted: #6b7280;
+    }
+
+    body {
+        margin: 0;
+        padding: 24px;
+        font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        color: #1f2328;
+        background: #fff;
+    }
+
+    h1 {
+        margin: 0 0 4px;
+        font-size: 20px;
+    }
+
+    .hint {
+        margin: 0 0 24px;
+        color: var(--muted);
+        font-size: 13px;
+    }
+
+    .container {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        max-width: 420px;
+    }
+
+    .item {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface);
+    }
+
+    .item--title {
+        padding: 8px 12px;
+        cursor: grab;
+    }
+
+    .item--children {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 0 8px 8px;
+    }
+
+    /* Пустой список не должен занимать место в раскладке */
+    .item--children:empty {
+        display: none;
+    }
+
+    .item-ghost {
+        opacity: .5;
+        background: #cde;
+        border: 1px dashed var(--accent);
+    }
+
+    .item-dragging {
+        display: none;
+    }
+
+    .section {
+        margin: 32px 0 12px;
+        font-size: 15px;
+        color: var(--muted);
+    }
+
+    .toolbar {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 16px;
+    }
+
+    button {
+        padding: 6px 12px;
+        font: inherit;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: #fff;
+        cursor: pointer;
+    }
+
+    button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+
+    #log {
+        margin: 24px 0 0;
+        max-height: 200px;
+        overflow: auto;
+        padding: 8px 12px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: #fbfbfc;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre-wrap;
+    }
+</style>
+</head>
+<body>
+<h1>native-drag-n-sort</h1>
+<p class="hint">
+    Демо открывается только по http: ES-модули по <code>file://</code> браузер блокирует
+    CORS-политикой. Запустите <code>npm run demo</code> и откройте
+    <a href="http://localhost:8080/">http://localhost:8080/</a>.
+</p>
+
+<div class="toolbar">
+    <button type="button" id="toggle-reorder">Режим: dom</button>
+    <button type="button" id="toggle-animation">Анимация: выкл</button>
+    <button type="button" id="cancel">Отменить перетаскивание</button>
+</div>
+
+<div class="container" id="root">
+    <div class="item" data-id="first">
         <div class="item--title">First</div>
-        <div class="item--children container"></div>
+        <div class="item--children container" data-id="first-c"></div>
     </div>
-    <div class="item">
+    <div class="item" data-id="second">
         <div class="item--title">Second</div>
-        <div class="item--children container">
-            <div class="item">
+        <div class="item--children container" data-id="second-c">
+            <div class="item" data-id="sub-first">
                 <div class="item--title">Sub-First</div>
-                <div class="item--children container"></div>
+                <div class="item--children container" data-id="sub-first-c"></div>
             </div>
-            <div class="item">
+            <div class="item" data-id="sub-second">
                 <div class="item--title">Sub-Second</div>
-                <div class="item--children container"></div>
+                <div class="item--children container" data-id="sub-second-c"></div>
             </div>
-            <div class="item">
+            <div class="item" data-id="sub-third">
                 <div class="item--title">Sub-Third</div>
-                <div class="item--children container"></div>
+                <div class="item--children container" data-id="sub-third-c"></div>
             </div>
         </div>
     </div>
-    <div class="item">
+    <div class="item" data-id="third">
         <div class="item--title">Third</div>
-        <div class="item--children container"></div>
-    </div>
-
-    <br><br><br><br><br><br>
-
-    <h3>Without Nested:</h3>
-
-    <div class="item--children container">
-        <div class="item">
-            <div class="item--title">Sub-First</div>
-        </div>
-        <div class="item">
-            <div class="item--title">Sub-Second</div>
-        </div>
-        <div class="item">
-            <div class="item--title">Sub-Third</div>
-        </div>
+        <div class="item--children container" data-id="third-c"></div>
     </div>
 </div>
 
-<script type="module" src="../index.js"></script>
+<h2 class="section">Плоский список без вложенности</h2>
+
+<div class="container" id="flat">
+    <div class="item" data-id="p1"><div class="item--title">Sub-First</div></div>
+    <div class="item" data-id="p2"><div class="item--title">Sub-Second</div></div>
+    <div class="item" data-id="p3"><div class="item--title">Sub-Third</div></div>
+</div>
+
+<pre id="log"></pre>
+
 <script type="module">
     import dragNDrop from '../index.js';
 
-    const dragManager = dragNDrop({
+    const log = document.getElementById('log');
+    const root = document.getElementById('root');
+    const flat = document.getElementById('flat');
+    const print = (line) => {
+        log.textContent = `${line}\n${log.textContent}`.split('\n').slice(0, 40).join('\n');
+    };
+
+    const options = {
         containerSelector: '.container',
         itemSelector: '.item',
         ghostClass: 'item-ghost',
         draggingClass: 'item-dragging',
-        // handleSelector: '.item-handle',
         dragDelay: 150,
         animation: false,
-        debug: true,
+        reorder: 'dom',
+    };
+
+    // Один инстанс обслуживает ровно один контейнер — первый подходящий под селектор.
+    // Для второго списка нужен второй инстанс; стили у них общие.
+    const rootManager = dragNDrop(options);
+    const flatManager = dragNDrop({ ...options, containerSelector: '#flat' });
+
+    for (const [container, label] of [[root, 'root'], [flat, 'flat']]) {
+        for (const type of ['dragStart', 'dragOver', 'drop', 'dragEnd', 'dragCancel']) {
+            container.addEventListener(type, (event) => {
+                print(`${label} ${type}: ${JSON.stringify(event.detail)}`);
+            });
+        }
+    }
+
+    // refresh() применяет новый конфиг без перезагрузки страницы
+    const apply = (patch) => {
+        Object.assign(options, patch);
+        rootManager.refresh(options);
+        flatManager.refresh({ ...options, containerSelector: '#flat' });
+    };
+
+    const reorderButton = document.getElementById('toggle-reorder');
+    reorderButton.addEventListener('click', () => {
+        const next = options.reorder === 'dom' ? 'manual' : 'dom';
+        apply({ reorder: next });
+        reorderButton.textContent = `Режим: ${next}`;
+        print(next === 'manual'
+            ? 'manual: модуль не меняет DOM, порядок применяет потребитель по событию drop'
+            : 'dom: модуль сам перемещает элемент после drop');
     });
 
-    // Подписка на события
-    document.querySelector('.container').addEventListener('dragStart', (e) => {
-        console.log('Drag started', e);
+    const animationButton = document.getElementById('toggle-animation');
+    animationButton.addEventListener('click', () => {
+        const next = !options.animation;
+        apply({ animation: next });
+        animationButton.textContent = `Анимация: ${next ? 'вкл' : 'выкл'}`;
     });
-    document.querySelector('.container').addEventListener('dragEnd', (e) => {
-        console.log('Drag ended', e);
+
+    document.getElementById('cancel').addEventListener('click', () => {
+        rootManager.cancel();
+        flatManager.cancel();
+    });
+
+    window.addEventListener('pagehide', () => {
+        rootManager.destroy();
+        flatManager.destroy();
     });
 </script>
-
-<style>
-    .container {
-        display: flex;
-        flex-direction: column;
-        gap: 20px;
-        margin-left: 20px;
-    }
-
-    .item {
-        border: 1px solid #ccc;
-        background-color: #f5f5f5;
-    }
-</style>
+</body>
+</html>

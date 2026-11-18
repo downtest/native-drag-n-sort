@@ -4,6 +4,8 @@ services:
         volumes:
             - .:/www
         working_dir: /www
+        environment:
+            PORT: '8080'
         ports:
-            - 83:80
+            - 8080:8080
         command: sh -c "node ./demo/server.cjs"
